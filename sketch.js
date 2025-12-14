@@ -9,13 +9,13 @@ let video;
 // Visual pulse
 let pulseSpeed = 0;
 let angle = 0;
-let baseDiameter = 180;
-let maxExpansion = 80;
+let baseDiameter = 200;
+let maxExpansion = 100;
 
 // State smoothing
 let currentLabel = "Background Noise";
 let lastSpeechTime = 0;
-let silenceThreshold = 1000; // ms
+let silenceThreshold = 1000;
 
 let DEBUG_FACE = false;
 
@@ -33,6 +33,8 @@ function preload() {
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
+
+  colorMode(HSB, 360, 100, 100, 255);
 
   video = createCapture({
     video: { width: 640, height: 480 },
@@ -72,6 +74,9 @@ function draw() {
   let expansion = sin(angle) * maxExpansion;
   let diameter = baseDiameter + expansion;
 
+  // Map pace → color (green → yellow → red)
+  let hue = map(pulseSpeed, 0, 0.25, 160, 0, true);
+
   // Visual intensity based on pace
   let alpha = map(pulseSpeed, 0, 0.25, 0, 220, true);
   let strokeW = map(pulseSpeed, 0, 0.25, 0.5, 6, true);
@@ -80,18 +85,20 @@ function draw() {
   if (alpha > 8) {
     noFill();
 
-    stroke(255, alpha);
+    stroke(hue, 80, 100, alpha);
     strokeWeight(strokeW);
     ellipse(width / 2, height / 2, diameter, diameter);
 
-    stroke(255, alpha * 0.3);
-    strokeWeight(max(1, strokeW * 0.6));
-    ellipse(
-      width / 2,
-      height / 2,
-      diameter * 1.12,
-      diameter * 1.12
-    );
+    for (let i = 1; i <= 4; i++) {
+      stroke(hue, 60, 100, alpha / (i + 1));
+      strokeWeight(max(1, strokeW * 0.6));
+      ellipse(
+        width / 2,
+        height / 2,
+        diameter + i * 25,
+        diameter + i * 25
+      );
+    }
   }
 
   angle += pulseSpeed;
