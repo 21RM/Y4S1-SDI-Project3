@@ -1,6 +1,7 @@
 // ------------------------------
 // Audio pace classifier (ml5) + VisionAssist overlays
 // + Filler detector (Web Speech API -> text -> regex)
+// + Interjections upgrade: expanded lexical + VAD fallback
 // ------------------------------
 
 // ML
@@ -39,16 +40,57 @@ let interimTranscript = ""; // live (interim) chunk
 let fillerCounts = {}; // term -> count
 let fillerHits = [];   // {term, ms, snippet}
 
-// Single-word fillers: keep them normalized (no accents, lowercase)
+// ASR timing (used to avoid VAD duplicates)
+let lastAsrAnyMs = 0;   // any onresult activity (interim or final)
+let lastAsrFinalMs = 0; // when a final chunk arrives
+
+// ------------------------------
+// VAD (energy-based) for non-lexical interjections
+// ------------------------------
+let mic, amp;
+let vadEnabled = true;
+let micReady = false;
+let micState = "off"; // off | starting | on | error
+let vadCalibrating = false;
+let vadCalibStart = 0;
+let vadNoiseMax = 0;
+let vadAutoCalibMs = 4000; // 4s
+
+
+// You can tune these if needed:
+let vadThreshold = 0.020;
+let vadMinMs = 120;       // min duration to count as an interjection
+let vadMaxMs = 1200;      // max duration to still be considered a short interjection
+
+let vadActive = false;
+let vadStartMs = 0;
+let lastVadHitMs = 0;
+
+// If ASR has produced text very recently, we assume VAD event is already represented in text
+let vadIgnoreAfterAsrMs = 350;
+
+// Rate-limit VAD hits so we don't count multiple times in one “hummm”
+let vadCooldownMs = 900;
+
+// ------------------------------
+// Fillers vocabulary / heuristics
+// ------------------------------
+
+// Single-word fillers (normalized: lowercase, no accents)
 const FILLERS_SINGLE = new Set([
-  // EN
-  "um", "uh", "erm", "hmm", "mm", "like", "so", "basically", "literally",
-  "actually", "right", "well",
-  // PT
-  "tipo", "pronto", "pa", "pois", "entao", "basicamente", "literalmente"
+  // EN (lexical + common interjections that ASR may output)
+  "um", "uh", "erm", "er",
+  "hmm", "hm", "mm", "mmm", "mhm",
+  "ah", "aah", "oh", "eh",
+  "like", "so", "basically", "literally", "actually", "right", "well",
+
+  // PT (normalized)
+  "tipo", "pronto", "pa", "pois", "entao", "basicamente", "literalmente",
+  "hum", "humm", "hm", "mm", "mmm",
+  "ah", "oh", "eh", "han"
 ]);
 
-// Multi-word fillers (also normalized)
+// Multi-word fillers (normalized)
 const FILLERS_MULTI = [
   "you know",
   "i mean",
@@ -61,9 +103,7 @@ const FILLERS_MULTI = [
   "estas a ver"
 ].map(normText);
 
-// Some words are often "real" words too (e.g. "so", "well").
-// We apply a small heuristic: count it as filler only if it's at the start of a clause
-// (start of text, after punctuation, or followed by comma/pause).
+// Words that are often legitimate too -> only count as filler in likely filler positions
 const AMBIGUOUS_SINGLE = new Set(["so", "well", "right", "like"]);
 
 function normText(s) {
@@ -76,7 +116,6 @@ function normText(s) {
 }
 
 function isSecureContextEnough() {
-  // SpeechRecognition typically requires HTTPS or localhost.
   const isLocalhost = location.hostname === "localhost" || location.hostname === "127.0.0.1";
   return location.protocol === "https:" || isLocalhost;
 }
@@ -86,12 +125,17 @@ function resetFillers() {
   fillerHits = [];
   finalTranscript = "";
   interimTranscript = "";
+  lastAsrAnyMs = 0;
+  lastAsrFinalMs = 0;
+  vadActive = false;
+  vadStartMs = 0;
+  lastVadHitMs = 0;
 }
 
 function incCount(term, snippet) {
   fillerCounts[term] = (fillerCounts[term] || 0) + 1;
   fillerHits.push({ term, ms: millis(), snippet });
-  if (fillerHits.length > 200) fillerHits.shift();
+  if (fillerHits.length > 300) fillerHits.shift();
 }
 
 function scanFillersIncremental(rawChunk) {
@@ -102,7 +146,16 @@ function scanFillersIncremental(rawChunk) {
   const normalized = normText(raw);
   if (!normalized) return;
 
-  // 1) multi-word fillers (simple substring counting)
+  // Extra: catch stretched interjections even if not in the set (e.g., hummm, ahhh, mmmm)
+  // This detects tokens like: hum/hummm, hm/hmmm, mm/mmmm, ah/ahhh, eh/ehhh, oh/ohhh
+  const tokens0 = normalized.split(" ");
+  for (const w of tokens0) {
+    if (/^(h+u+m+|h+m+|m+|a+h+|e+h+|o+h+)$/.test(w)) {
+      incCount(w, raw);
+    }
+  }
+
+  // 1) multi-word fillers (substring counting)
   for (const phrase of FILLERS_MULTI) {
     let idx = 0;
     while (true) {
@@ -113,19 +166,17 @@ function scanFillersIncremental(rawChunk) {
     }
   }
 
-  // 2) single-word fillers with a bit of punctuation awareness from raw
+  // 2) single-word fillers with ambiguity heuristic
   const rawLower = raw.toLowerCase();
   const tokens = normalized.split(" ");
 
   for (const tok of tokens) {
     if (!FILLERS_SINGLE.has(tok)) continue;
 
-    // heuristic for ambiguous singles
     if (AMBIGUOUS_SINGLE.has(tok)) {
+      // count only when it appears as clause starter (after punctuation / beginning)
       const re = new RegExp(`(^|[\\.\\!\\?\\;\\:\\,\\n\\r\\t]\\s*)(${tok})(\\b)`, "g");
-      if (re.test(rawLower)) {
-        incCount(tok, raw);
-      }
+      if (re.test(rawLower)) incCount(tok, raw);
       continue;
     }
 
@@ -134,10 +185,9 @@ function scanFillersIncremental(rawChunk) {
 }
 
 function highlightFillers(text) {
-  // highlight in display only (do NOT change counting)
   let out = text;
 
-  // multi-word first (longer first to avoid nesting)
+  // multi-word first (avoid nesting)
   const multiSorted = [...FILLERS_MULTI].sort((a, b) => b.length - a.length);
   for (const phrase of multiSorted) {
     if (!phrase) continue;
@@ -151,6 +201,9 @@ function highlightFillers(text) {
     const re = new RegExp(`\\b${escapeRegex(w)}\\b`, "ig");
     out = out.replace(re, (m) => `{${m}}`);
   }
+
+  // stretched interjections (display only)
+  out = out.replace(/\b(h+u+m+|h+m+|m{2,}|a+h+|e+h+|o+h+)\b/ig, (m) => `{${m}}`);
 
   return out;
 }
@@ -192,7 +245,9 @@ function setupASR() {
   };
 
   speechRec.onresult = (e) => {
-    // Build final + interim
+    // Mark activity (interim or final)
+    lastAsrAnyMs = millis();
+
     let newFinal = "";
     let newInterim = "";
 
@@ -204,6 +259,7 @@ function setupASR() {
     }
 
     if (newFinal.trim()) {
+      lastAsrFinalMs = millis();
       finalTranscript = (finalTranscript + " " + newFinal).replace(/\s+/g, " ").trim();
       scanFillersIncremental(newFinal);
     }
@@ -217,14 +273,11 @@ function setupASR() {
   };
 
   speechRec.onend = () => {
-    // Some browsers stop randomly; keep alive if enabled.
     if (asrEnabled) {
       try {
         speechRec.lang = asrLang;
         speechRec.start();
-      } catch (_) {
-        // ignore
-      }
+      } catch (_) {}
     } else {
       asrStatus = "idle";
       updateUI();
@@ -247,9 +300,7 @@ function startASR() {
   try {
     speechRec.lang = asrLang;
     speechRec.start();
-  } catch (_) {
-    // already started
-  }
+  } catch (_) {}
 }
 
 function stopASR() {
@@ -272,12 +323,14 @@ function bindUI() {
 
   if (btn) btn.addEventListener("click", toggleASR);
 
+  const micBtn = document.getElementById("micEnable");
+  if (micBtn) micBtn.addEventListener("click", enableMicForVAD);
+
   if (langEl) {
     langEl.addEventListener("change", (e) => {
       asrLang = e.target.value || "en-US";
       if (speechRec) speechRec.lang = asrLang;
 
-      // Restart to apply lang cleanly
       if (asrEnabled) {
         stopASR();
         startASR();
@@ -287,6 +340,66 @@ function bindUI() {
   }
 
   updateUI();
+}
+
+
+// ------------------------------
+// VAD logic (energy-based)
+// ------------------------------
+function updateVAD() {
+  if (!vadEnabled || !amp || !micReady) return;
+
+  const level = amp.getLevel();
+  const now = millis();
+
+  // auto-calibration window: estimate ambient noise max and set threshold a bit above it
+  if (vadCalibrating) {
+    vadNoiseMax = Math.max(vadNoiseMax, level);
+    if (now - vadCalibStart > vadAutoCalibMs) {
+      vadCalibrating = false;
+      // set threshold slightly above noise max, with a sane floor
+      vadThreshold = Math.max(0.015, vadNoiseMax * 2.5);
+      // and cap it to avoid absurd thresholds
+      vadThreshold = Math.min(vadThreshold, 0.08);
+      console.log("VAD calibrated. noiseMax=", vadNoiseMax, "threshold=", vadThreshold);
+    }
+    // still allow VAD to run during calibration, but with a safe temporary threshold
+    // (no return here)
+  }
+
+  // Start VAD
+  if (!vadActive && level >= vadThreshold) {
+    // basic debounce: ignore if we just recorded one
+    if (now - lastVadHitMs < vadCooldownMs) return;
+
+    vadActive = true;
+    vadStartMs = now;
+    return;
+  }
+
+  // End VAD
+  if (vadActive && level < vadThreshold * 0.75) {
+    const dur = now - vadStartMs;
+    vadActive = false;
+
+    // duration gate
+    if (dur < vadMinMs || dur > vadMaxMs) return;
+
+    // ignore if ASR was active very recently (likely already represented in text)
+    if (now - lastAsrFinalMs < vadIgnoreAfterAsrMs) return;
+
+    // Optional: if we are in "Background Noise" for a long time, be conservative
+    // (but we still allow short bursts)
+    // if (currentLabel === "Background Noise") return; // uncomment to be stricter
+
+    // Record as a vocal filler event
+    lastVadHitMs = now;
+
+    // Heuristic label based on duration (useful for analysis)
+    // short ~ "ah/eh", longer ~ "hum/mm"
+    const label = dur < 320 ? "vocal_filler_short" : "vocal_filler_long";
+    incCount(label, `VAD ${Math.round(dur)}ms`);
+  }
 }
 
 // ------------------------------
@@ -304,6 +417,9 @@ function keyPressed() {
   }
   if (key === "t" || key === "T") {
     toggleASR();
+  }
+  if (key === "v" || key === "V") {
+    vadEnabled = !vadEnabled;
   }
 }
 
@@ -332,6 +448,46 @@ function setup() {
   setupASR();
 }
 
+async function enableMicForVAD() {
+  try {
+    micState = "starting";
+    micReady = false;
+
+    // make sure audio context is running (Chrome requirement)
+    const ctx = getAudioContext();
+    if (ctx.state !== "running") {
+      await ctx.resume();
+    }
+    userStartAudio();
+
+    mic = new p5.AudioIn();
+
+    // mic.start can take callbacks
+    mic.start(
+      () => {
+        amp = new p5.Amplitude();
+        amp.setInput(mic);
+        micReady = true;
+        micState = "on";
+
+        // optional: auto-calibrate threshold from ambient noise
+        vadCalibrating = true;
+        vadCalibStart = millis();
+        vadNoiseMax = 0;
+      },
+      (err) => {
+        console.warn("mic.start error:", err);
+        micState = "error";
+        micReady = false;
+      }
+    );
+  } catch (e) {
+    console.warn("enableMicForVAD exception:", e);
+    micState = "error";
+    micReady = false;
+  }
+}
+
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
 }
@@ -342,6 +498,9 @@ function draw() {
 
   VisionAssist.update(width, height);
   VisionAssist.drawOverlays(width, height);
+
+  // Update VAD every frame (cheap)
+  updateVAD();
 
   // Update pulse speed smoothly
   if (currentLabel === "Fast") {
@@ -395,7 +554,6 @@ function drawVideoCover(vid, x, y, w, h) {
 }
 
 function wrapTextLines(str, maxChars) {
-  // Simple char-based wrap (fast + stable)
   const s = (str || "").trim();
   if (!s) return [];
   const words = s.split(/\s+/);
@@ -413,9 +571,8 @@ function wrapTextLines(str, maxChars) {
   return lines;
 }
 
-// Bottom label overlay
 function drawLabel() {
-  let barHeight = 170;
+  let barHeight = 190;
 
   noStroke();
   fill(0, 150);
@@ -447,15 +604,14 @@ function drawLabel() {
   text(`P: ${s.posture.toFixed(2)} | level:${d.shoulderLevel.toFixed(2)} head:${d.head.toFixed(2)}`, x, y);
   y += 26;
 
-  // ---------- FILLERS OVERLAY ----------
   const top = Object.entries(fillerCounts)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
+    .slice(0, 7)
     .map(([k, v]) => `${k}:${v}`)
     .join("  ");
 
   textSize(14);
-  text(`ASR: ${asrEnabled ? "ON" : "OFF"} (${asrLang}) | reset: R | toggle: T`, x, y);
+  text(`ASR: ${asrEnabled ? "ON" : "OFF"} (${asrLang}) | VAD: ${vadEnabled ? "ON" : "OFF"} (toggle V)`, x, y);
   y += 18;
 
   text(`Fillers(top): ${top || "-"}`, x, y);
@@ -465,12 +621,29 @@ function drawLabel() {
   const display = combined ? highlightFillers(combined) : "(sem transcrição)";
   const lines = wrapTextLines(display, Math.max(40, Math.floor((width - 28) / 9)));
 
-  // show last 2 lines of transcript to keep UI clean
   const last2 = lines.slice(-2);
   text(`Transcript: ${last2.join(" / ")}`, x, y);
+  y += 18;
+
+  const ctx = getAudioContext();
+  const ctxState = ctx ? ctx.state : "n/a";
+
+  if (amp) {
+    const lvl = amp.getLevel();
+    text(
+      `Mic: ${micState} | ctx:${ctxState} | level:${lvl.toFixed(3)} | thr:${vadThreshold.toFixed(3)} | VAD:${vadEnabled ? "ON" : "OFF"} (V)`,
+      x,
+      y
+    );
+  } else {
+    text(
+      `Mic: ${micState} | ctx:${ctxState} | (click "Enable Mic (VAD)")`,
+      x,
+      y
+    );
+  }
 }
 
-// Audio classification callback
 function gotResult(error, results) {
   if (error) {
     console.error(error);
