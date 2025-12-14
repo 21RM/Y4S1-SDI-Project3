@@ -8,6 +8,7 @@ let maxExpansion = 100;
 
 let currentLabel = "Background Noise";
 let lastSpeechTime = 0;
+let silenceThreshold = 1000; // ms
 
 let DEBUG_FACE = false;
 
@@ -17,6 +18,8 @@ function preload() {
 
 function setup() {
   createCanvas(windowWidth, windowHeight);
+
+  colorMode(HSB, 360, 100, 100, 255);
 
   colorMode(HSB, 360, 100, 100, 255);
 
@@ -66,6 +69,9 @@ function draw() {
 
   let expansion = sin(angle) * maxExpansion;
   let diameter = baseDiameter + expansion;
+
+  // Map pace → color (green → yellow → red)
+  let hue = map(pulseSpeed, 0, 0.25, 160, 0, true);
 
   let hue = map(pulseSpeed, 0, 0.25, 160, 0, true);
 
