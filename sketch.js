@@ -17,38 +17,47 @@ let currentLabel = "Background Noise";
 let lastSpeechTime = 0;
 let silenceThreshold = 1000; // ms
 
+let DEBUG_FACE = false;
+
+function keyPressed() {
+  if (key === 'd' || key === 'D') {
+    DEBUG_FACE = !DEBUG_FACE;
+    VisionAssist.setDebugMode(DEBUG_FACE);
+    console.log("Debug mode:", DEBUG_FACE);
+  }
+}
+
 function preload() {
   classifier = ml5.soundClassifier(soundModelURL);
 }
 
 function setup() {
-  createCanvas(640, 480);
+  createCanvas(windowWidth, windowHeight);
 
-  // Webcam setup
   video = createCapture({
-    video: {
-      width: 640,
-      height: 480
-    },
+    video: { width: 640, height: 480 },
     audio: false
   });
 
-  video.size(width, height);
+  video.size(640, 480);
   video.hide();
 
-  video.elt.onloadedmetadata = () => {
-    console.log("Webcam ready");
-  };
+  VisionAssist.init(video);
 
-  // Start audio classification
   classifier.classify(gotResult);
-
   textFont("sans-serif");
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
 }
 
 function draw() {
   // Draw webcam only
-  image(video, 0, 0, width, height);
+  drawVideoCover(video, 0, 0, width, height);
+
+  VisionAssist.update(width, height);
+  VisionAssist.drawOverlays(width, height);
 
   // Update pulse speed smoothly
   if (currentLabel === "Fast") {
@@ -91,23 +100,44 @@ function draw() {
   drawLabel();
 }
 
+function drawVideoCover(vid, x, y, w, h) {
+  const vw = vid.elt.videoWidth || vid.width;
+  const vh = vid.elt.videoHeight || vid.height;
+  if (!vw || !vh) return;
+
+  const scale = Math.max(w / vw, h / vh);
+  const sw = w / scale;
+  const sh = h / scale;
+
+  const sx = (vw - sw) / 2;
+  const sy = (vh - sh) / 2;
+
+  image(vid, x, y, w, h, sx, sy, sw, sh);
+}
+
 // Bottom label overlay
 function drawLabel() {
-  let padding = 10;
-  let barHeight = 36;
+  let barHeight = 90;
 
   noStroke();
-  fill(0, 120); // semi-transparent black
+  fill(0, 150);
   rect(0, height - barHeight, width, barHeight);
+
+  const s = VisionAssist.getScores();
+  const d = VisionAssist.getDebug();
 
   fill(255);
   textSize(16);
-  textAlign(CENTER, CENTER);
-  text(
-    currentLabel,
-    width / 2,
-    height - barHeight / 2
-  );
+  textAlign(LEFT, TOP);
+
+  const x = 14;
+  const y = height - barHeight + 10;
+
+  text(`Audio: ${currentLabel}`, x, y);
+  text(`E: ${s.engagement.toFixed(2)} | faceDetected: ${d.faceDetected}`, x, y + 22);
+  text(`centered: ${d.centered.toFixed(2)}  yaw: ${d.yawBalance.toFixed(2)}  express: ${d.express.toFixed(2)}`, x, y + 44);
+  text(`P: ${s.posture.toFixed(2)} | level:${d.shoulderLevel.toFixed(2)} head:${d.head.toFixed(2)}`, x, y + 66);
+
 }
 
 // Audio classification callback
