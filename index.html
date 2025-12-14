@@ -8,16 +8,56 @@
     <style>
         html, body { height: 100%; margin: 0; padding: 0; overflow: hidden; }
         canvas { display: block; }
+
+        /* small overlay UI */
+        #ui {
+          position: fixed;
+          top: 12px;
+          left: 12px;
+          z-index: 9999;
+          display: flex;
+          gap: 8px;
+          align-items: center;
+          padding: 10px 12px;
+          border-radius: 12px;
+          background: rgba(0,0,0,0.55);
+          color: #fff;
+          font-family: sans-serif;
+          font-size: 14px;
+          user-select: none;
+          backdrop-filter: blur(6px);
+        }
+        #ui button, #ui select {
+          font: inherit;
+          padding: 6px 10px;
+          border-radius: 10px;
+          border: 1px solid rgba(255,255,255,0.25);
+          background: rgba(255,255,255,0.08);
+          color: #fff;
+          cursor: pointer;
+        }
+        #ui button:hover, #ui select:hover { background: rgba(255,255,255,0.14); }
+        #ui .pill { padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.12); }
+        #ui .warn { background: rgba(255, 155, 0, 0.18); border: 1px solid rgba(255, 155, 0, 0.28); }
     </style>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
-
     <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/addons/p5.sound.min.js"></script>
-
     <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
   </head>
 
   <body>
+    <div id="ui">
+      <button id="asrToggle" type="button">ASR: OFF</button>
+      <select id="asrLang" aria-label="ASR language">
+        <option value="en-US">en-US</option>
+        <option value="pt-PT">pt-PT</option>
+        <option value="pt-BR">pt-BR</option>
+      </select>
+      <span id="asrStatus" class="pill">idle</span>
+      <span id="httpsHint" class="pill warn" style="display:none">precisa HTTPS/localhost</span>
+    </div>
+
     <script src="sketch.js"></script>
     <script src="engagement.js"></script>
   </body>
