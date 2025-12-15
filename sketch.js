@@ -9,6 +9,8 @@ let maxExpansion = 100;
 let currentLabel = "Background Noise";
 let lastSpeechTime = 0;
 
+let envDim = 0; // 0 = bright, 1 = fully dim
+
 let DEBUG_FACE = false;
 
 function preload() {
@@ -93,6 +95,12 @@ function draw() {
   }
   
   angle += pulseSpeed;
+  
+  if (envDim > 0.01) {
+    noStroke();
+    fill(0, 0, 0, envDim * 180); // alpha controls darkness
+    rect(0, 0, width, height);
+  }
 
   drawLabel();
 }
@@ -161,6 +169,18 @@ function drawLabel() {
 
   const ctx = getAudioContext();
   const lvl = window.VAD.getLevel();
+
+  // target dim: silence → darker
+  let targetDim = 1;
+
+  // if mic is active and sound exists, reduce dim
+  if (lvl != null) {
+    targetDim = map(lvl, 0.0, window.AppConfig.vad.threshold, 1, 0, true);
+  }
+
+  // smooth transition
+  envDim = lerp(envDim, targetDim, 0.06);
+
   text(
     `Mic: ${window.VAD.micState} | ctx:${ctx ? ctx.state : "n/a"} | level:${lvl == null ? "n/a" : lvl.toFixed(3)} | thr:${window.AppConfig.vad.threshold.toFixed(3)}`,
     x,
