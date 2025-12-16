@@ -13,6 +13,8 @@ let envDim = 0; // 0 = bright, 1 = fully dim
 
 let DEBUG_FACE = false;
 
+let blurEMA = 0;
+
 function preload() {
   classifier = ml5.soundClassifier(window.AppConfig.soundModelURL);
 }
@@ -50,9 +52,19 @@ function mousePressed() {
 }
 
 function draw() {
-  drawVideoCover(video, 0, 0, width, height);
+  VisionAssist.update(width, height); 
 
-  VisionAssist.update(width, height);
+  const d = VisionAssist.getDebug();
+  const contact = d.faceDetected ? d.yawBalance : 0;
+  const noContact = (contact >= 0.85) ? 0 : map(contact, 0.85, 0.0, 0.0, 1.0, true);
+  const shaped = pow(noContact, 0.6);
+  const targetBlur = map(shaped, 0, 1, 0, 10, true);
+  blurEMA = lerp(blurEMA, targetBlur, 0.12);
+
+  drawingContext.filter = `blur(${blurEMA.toFixed(2)}px)`;
+  drawVideoCover(video, 0, 0, width, height);
+  drawingContext.filter = "none";
+
   VisionAssist.drawOverlays(width, height);
 
   window.VAD.update((label, snippet) => {

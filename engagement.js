@@ -144,14 +144,165 @@ window.VisionAssist = (() => {
     }
 
     function drawOverlays(w, h) {
+        const t = getCoverTransform(w, h);
+        if (!t) return;
+
+        drawShoulderLine(t);
+        drawHeadHalo(t);
+        drawExpressBar(w, h);
+        drawCenterArrows(w, h);
+
         if (debugMode) {
-            const t = getCoverTransform(w, h);
-            if (t) {
-                drawFaceDebug(t);
-                drawPoseDebug(t);
-            }
+            drawFaceDebug(t);
+            drawPoseDebug(t);
         }
     }
+
+    function drawShoulderLine(t) {
+        if (!dbg.poseDetected) return;
+        if (!dbgPosePts.ls || !dbgPosePts.rs) return;
+
+        const L = mapVideoPtToCanvas([dbgPosePts.ls.x, dbgPosePts.ls.y], t);
+        const R = mapVideoPtToCanvas([dbgPosePts.rs.x, dbgPosePts.rs.y], t);
+
+        const good = clamp01(dbg.shoulderLevel);
+        const bad = 1 - good;
+
+        const aMain = map(bad, 0, 1, 60, 220, true);
+        const wMain = map(bad, 0, 1, 2, 7, true);
+
+        const colBad = color(255, 60, 60);
+        const colGood = color(80, 255, 120);
+        const col = lerpColor(colGood, colBad, good);
+
+        stroke(col.levels[0], col.levels[1], col.levels[2], aMain);
+        strokeWeight(wMain);
+        line(L[0], L[1], R[0], R[1]);
+
+        const aGlow = map(good, 0, 1, 0, 120, true);
+        stroke(col.levels[0], col.levels[1], col.levels[2], aGlow);
+        strokeWeight(2);
+        line(L[0], L[1] - 6, R[0], R[1] - 6);
+    }
+
+    function drawHeadHalo(t) {
+        if (!dbg.poseDetected) return;
+        if (!dbgPosePts.nose) return;
+
+        const N = mapVideoPtToCanvas([dbgPosePts.nose.x, dbgPosePts.nose.y], t);
+
+        const good = clamp01(dbg.head);
+        const bad = 1 - good;
+
+        const yOffset = map(bad, 0, 1, 200, 180, true);
+        const cx = N[0];
+        const cy = N[1] - yOffset;
+
+        const r = map(bad, 0, 1, 80, 50, true);
+        const a = map(bad, 0, 1, 60, 190, true);
+
+        if (a < 2) return;
+
+        const colBad = color(255, 80, 80);
+        const colGood = color(120, 255, 160);
+        const col = lerpColor(colGood, colBad, good);
+
+        noFill();
+
+        stroke(col.levels[0], col.levels[1], col.levels[2], a);
+        strokeWeight(10);
+        ellipse(cx, cy, r * 2.2, r * 1.4);
+
+        stroke(col.levels[0], col.levels[1], col.levels[2], a * 0.45);
+        strokeWeight(4);
+        ellipse(cx, cy, r * 1.7, r * 1.1);
+
+        const hintA = map(bad, 0, 1, 0, 160, true);
+        if (hintA > 5) {
+            stroke(col.levels[0], col.levels[1], col.levels[2], hintA);
+            strokeWeight(3);
+            line(cx, cy + r * 0.85, cx, cy + r * 0.35);
+            line(cx, cy + r * 0.35, cx - 10, cy + r * 0.50);
+            line(cx, cy + r * 0.35, cx + 10, cy + r * 0.50);
+        }
+    }
+
+
+    function drawExpressBar(w, h) {
+        const pad = 18;
+        const barW = 18;
+        const barH = Math.min(220, h * 0.35);
+        const x = w - pad - barW;
+        const y = h * 0.5 - barH / 2;
+
+        noStroke();
+        fill(0, 120);
+        rect(x - 6, y - 6, barW + 12, barH + 12, 10);
+
+        const v = clamp01(engageEMA);
+        const fillH = barH * v;
+
+        const colLow = color(255, 80, 80);
+        const colHigh = color(120, 255, 160);
+        const col = lerpColor(colHigh, colLow, v);
+
+        fill(col.levels[0], col.levels[1], col.levels[2], 200);
+        rect(x, y + (barH - fillH), barW, fillH, 8);
+
+        noFill();
+        stroke(255, 90);
+        strokeWeight(2);
+        rect(x, y, barW, barH, 8);
+
+        const thresh = 0.55;
+        const ty = y + barH * (1 - thresh);
+        stroke(255, 120);
+        line(x - 6, ty, x + barW + 6, ty);
+    }
+
+    function drawCenterArrows(w, h) {
+        if (!dbg.faceDetected) return;
+
+        const centered = clamp01(dbg.centered);  
+        const off = 1 - centered;            
+
+        if (off < 0.10) return;
+        let dir = 0;
+        if (dbgPts.nose) {
+            const t = getCoverTransform(w, h);
+            if (!t) return;
+            const [nx, ny] = mapVideoPtToCanvas(dbgPts.nose, t);
+            dir = (nx < w / 2) ? -1 : 1;
+        } else {
+            return;
+        }
+
+        const a = map(off, 0.10, 1.0, 0, 180, true);
+        const pulse = 0.6 + 0.4 * Math.sin(millis() * 0.006);
+        const alpha = a * pulse;
+
+        const margin = 40;
+        const y = h * 0.5;
+        const x = (dir < 0) ? margin : (w - margin);
+
+        const size = map(off, 0.10, 1.0, 18, 40, true);
+        const gap = 14;
+
+        stroke(255, 0, 0, alpha);
+        strokeWeight(6);
+        strokeCap(ROUND);
+        noFill();
+
+        drawChevron(x, y, size, dir);
+        drawChevron(x - dir * gap, y, size * 0.85, dir);
+    }
+
+    function drawChevron(x, y, s, dir) {
+        const dx = -dir * s;
+        line(x - dx, y - s * 0.6, x, y);
+        line(x - dx, y + s * 0.6, x, y);
+    }
+
 
     function drawFaceDebug(t) {
         const drawMapped = (pt, r, col) => {
