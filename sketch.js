@@ -15,6 +15,13 @@ let DEBUG_FACE = false;
 
 let blurEMA = 0;
 
+const UI_MODE = {
+  HIDDEN: 0,
+  SIMPLE: 1,
+  FULL: 2
+};
+let uiMode = UI_MODE.FULL;
+
 function preload() {
   classifier = ml5.soundClassifier(window.AppConfig.soundModelURL);
 }
@@ -44,6 +51,10 @@ function keyPressed() {
   if (key === "r" || key === "R") { window.Fillers.reset(); window.VAD.reset(); }
   if (key === "t" || key === "T") { window.Fillers.toggle(); window.AppUI.update(); }
   if (key === "v" || key === "V") { window.VAD.toggleEnabled(); }
+
+  if (key === "1") uiMode = UI_MODE.HIDDEN;
+  if (key === "2") uiMode = UI_MODE.SIMPLE;
+  if (key === "3") uiMode = UI_MODE.FULL; 
 }
 
 function mousePressed() {
@@ -114,7 +125,7 @@ function draw() {
     rect(0, 0, width, height);
   }
 
-  drawLabel();
+  if (uiMode !== UI_MODE.HIDDEN) drawLabel();
 }
 
 function drawVideoCover(vid, x, y, w, h) {
@@ -145,7 +156,7 @@ function wrapTextLines(str, maxChars) {
 }
 
 function drawLabel() {
-  const barHeight = 190;
+  const barHeight = (uiMode === UI_MODE.SIMPLE) ? 120 : 190;
   noStroke(); fill(0, 150);
   rect(0, height - barHeight, width, barHeight);
 
@@ -156,6 +167,33 @@ function drawLabel() {
 
   const x = 14;
   let y = height - barHeight + 10;
+
+  if (uiMode === UI_MODE.SIMPLE) {
+    textSize(16);
+    text(
+      `Audio: ${currentLabel} | Engagement:${s.engagement.toFixed(2)} Posture:${s.posture.toFixed(2)}`,
+      x, y
+    );
+    y += 22;
+
+    textSize(14);
+    const combined = window.Fillers.combinedTranscript();
+    const display = combined ? window.Fillers.highlight(combined) : "(sem transcrição)";
+    const short = lastNWords(display, 22);
+    const lines = wrapTextLines(short, Math.max(40, Math.floor((width - 28) / 9)));
+    text(`Transcript: ${lines.slice(-2).join(" / ")}`, x, y);
+    y += 18;
+
+    const top = Object.entries(window.Fillers.counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([k, v]) => `${k}:${v}`)
+      .join("  ");
+
+    text(`Fillers: ${top || "-"}`, x, y);
+    return;
+  }
+
 
   textSize(16);
   text(`Audio: ${currentLabel}`, x, y); y += 22;
@@ -176,7 +214,8 @@ function drawLabel() {
 
   const combined = window.Fillers.combinedTranscript();
   const display = combined ? window.Fillers.highlight(combined) : "(sem transcrição)";
-  const lines = wrapTextLines(display, Math.max(40, Math.floor((width - 28) / 9)));
+  const short = lastNWords(display, 22);
+  const lines = wrapTextLines(short, Math.max(40, Math.floor((width - 28) / 9)));
   text(`Transcript: ${lines.slice(-2).join(" / ")}`, x, y); y += 18;
 
   const ctx = getAudioContext();
@@ -198,6 +237,12 @@ function drawLabel() {
     x,
     y
   );
+}
+
+function lastNWords(str, n) {
+  const words = (str || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= n) return (str || "").trim();
+  return words.slice(-n).join(" ");
 }
 
 function gotResult(error, results) {
